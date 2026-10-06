@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How much RAM does a small web app really need</title>
+<style>
+body{margin:0;font-family:Verdana,sans-serif;background:#fff;color:#222;font-size:15px}
+.layout{display:flex;max-width:1000px;margin:0 auto;gap:30px;padding:20px}
+.main{flex:3;min-width:0}.side{flex:1;border-left:1px solid #eee;padding-left:20px}
+header{background:#2e7d32;color:#fff;padding:20px}.hd{max-width:1000px;margin:0 auto}
+h1.site{margin:0;font-size:1.4rem}.tg{opacity:.9;font-size:.85rem}
+h2{color:#2e7d32;border-bottom:2px solid #c8e6c9;padding-bottom:4px}
+.ad-wrap{margin:20px 0;padding:8px;background:#f1f8e9}
+a{color:#2e7d32}pre{background:#263238;color:#eceff1;padding:12px;overflow:auto}
+footer{text-align:center;padding:24px;color:#999;font-size:.8rem;border-top:1px solid #eee}
+@media(max-width:700px){.layout{flex-direction:column}.side{border:0;padding:0}}
+</style><script async src="https://www.googletagmanager.com/gtag/js?id=G-9VBXSW7347"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config","G-9VBXSW7347");</script></head><body>
+<header><div class="hd"><h1 class="site">HostBench Notes</h1><div class="tg">Deploy notes, VPS benchmarks, hosting teardowns.</div></div></header>
+<div class="layout"><div class="main"><h1>How much RAM does a small web app really need</h1><p>Picking a server size feels like a guessing game until you've burned money on a $40/month box that sits at 4% CPU while your $6/month droplet gets OOM-killed at 3am. Let's cut through the uncertainty with real numbers so you can make a confident choice before you deploy—and know when it's time to scale up.</p>
+
+<h2>Start With What's Actually in Memory</h2>
+
+<p>RAM usage for a web app isn't just your application code. The real number is a sum of several layers running simultaneously:</p>
+
+<ul>
+  <li><strong>Operating system baseline</strong> – Ubuntu 22.04 LTS idles at roughly 180–250 MB on a fresh VPS</li>
+  <li><strong>Your runtime</strong> – Node.js starts around 30–60 MB per process; a Python/gunicorn worker is 40–80 MB; a Go binary can sit under 15 MB</li>
+  <li><strong>Your web server</strong> – Nginx typically uses 5–15 MB total; Caddy is similar</li>
+  <li><strong>Database</strong> – If SQLite, near zero extra cost; PostgreSQL with default settings uses 20–30 MB at idle but climbs fast under load</li>
+  <li><strong>Background workers, cron jobs, monitoring agents</strong> – easily another 50–100 MB you forgot to account for</li>
+</ul>
+
+<p>Add it up and a realistic "simple" stack is already at 400–600 MB before a single user hits the front page.</p>
+
+<h2>Real-World Benchmarks by Stack</h2>
+
+<h3>Node.js + Express + SQLite</h3>
+<p>A straightforward REST API with a few routes and no heavy dependencies idles around 80–120 MB. Spin up four workers with PM2 and you're looking at 350–450 MB steady-state. This stack runs comfortably on a 1 GB droplet for a few hundred concurrent users, with room left for the OS and Nginx.</p>
+
+<h3>Python + Django or FastAPI + PostgreSQL</h3>
+<p>Django with 4 gunicorn workers hits roughly 400–600 MB depending on installed apps. FastAPI is leaner—3 uvicorn workers land closer to 200–300 MB. If PostgreSQL lives on the same server, add another 50–150 MB depending on <code>shared_buffers</code> config. A 1 GB VPS is tight here; 2 GB gives you breathing room.</p>
+
+<h3>Ruby on Rails + Puma</h3>
+<p>Rails is the RAM-hungry one. A stock app with 3 Puma threads can consume 300–500 MB on its own. Factor in PostgreSQL and you're pushing against a 1 GB limit quickly. Budget for 2 GB minimum if you want stable deployments.</p>
+
+<h3>Go or Rust microservice</h3>
+<p>These are outliers in the best way. A compiled Go API serving JSON typically uses 15–40 MB at rest. You can run multiple services plus Postgres on a 512 MB server and still have headroom. If you're choosing a runtime and RAM cost matters, this is worth noting.</p>
+
+<h2>A Simple Sizing Formula</h2>
+
+<p>Use this rough calculation before you order your next server:</p>
+
+<pre><code>Required RAM =
+  OS baseline (~250 MB)
+  + (workers × per-worker memory)
+  + database idle footprint
+  + buffer for spikes (20–30%)
+  + any sidecar processes</code></pre>
+
+<p>For a Django app with 4 gunicorn workers and local Postgres, that's roughly: 250 + (4 × 120) + 100 + 130 = <strong>~960 MB</strong>. That's why a 1 GB server is risky—you want 2 GB.</p>
+
+<h2>What Happens When You Under-Provision</h2>
+
+<p>The Linux OOM killer isn't subtle. When your server runs out of RAM it starts terminating processes—usually the most memory-hungry one, which is typically your app server. You wake up to a dead site, no log entry explaining why, and a confused database that didn't get a clean shutdown. Enable swap as a safety net, but don't rely on it for performance—swapping to disk can make a web server 10–20x slower under load.</p>
+
+<p>Adding 1 GB of swap on a DigitalOcean or Hetzner VPS takes two minutes and has saved countless indie apps from 3am incidents:</p>
+
+<pre><code>fallocate -l 1G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab</code></pre>
+
+<h2>Cost vs. Headroom: The Practical Tiers</h2>
+
+<ul>
+  <li><strong>512 MB (~$4–5/mo)</strong> – Only viable for compiled languages (Go, Rust) or very simple PHP sites. Add swap immediately.</li>
+  <li><strong>1 GB (~$6–8/mo)</strong> – Good for Node or lightweight Python apps. Keep the database elsewhere or use SQLite.</li>
+  <li><strong>2 GB (~$12–18/mo)</strong> – The sweet spot for most indie apps. Handles Django, Rails, or Node with a local Postgres comfortably.</li>
+  <li><strong>4 GB (~$24–36/mo)</strong> – Ready for moderate traffic, multiple workers, and some caching layers. Most small teams won't need to go beyond this until they have real revenue.</li>
+</ul>
+
+<h2>Before You Upgrade, Profile First</h2>
+
+<p>If your server is struggling, check actual consumption before throwing money at it. SSH in and run:</p>
+
+<pre><code>free -h
+ps aux --sort=-%mem | head -15</code></pre>
+
+<p>Often you'll find a rogue background job, an untuned <code>shared_buffers</code> in Postgres, or a memory leak in one worker that's the actual culprit. Fixing the root cause is cheaper than the next server tier—and you'll understand your stack better for it.</p>
+
+<p>The honest answer to how much RAM you need is: more than the minimum spec, less than you think once you measure it properly. Start with 2 GB for anything Python or Ruby, 1 GB for lean Node or Go apps, always add swap, and actually monitor memory in production for the first week. You'll stop guessing and start knowing.</p></div>
+<aside class="side"><nav><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a</a><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt </a><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small we</a><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a revers</a><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth</a></nav><h3>Recent</h3><ul><li><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a $5 VPS in 1</a></li><li><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt and auto-ren</a></li><li><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small web app really</a></li><li><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a reverse proxy, ste</a></li><li><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth it or overk</a></li></ul><div class="ad-wrap"><ins style="width: 0px;height:0px" data-width="0" data-height="0" class="l28cfacb682" data-domain="//data527.click" data-affquery="/80bf04636f050fc4e325/28cfacb682/?placementName=default"><script src="//data527.click/js/responsive.js" async></script></ins>
+<script type="text/javascript" src="//data527.click/a25fdca16729aaaf6cc4/bc94ac2c10/?placementName=default"></script>
+<script type="text/javascript" src="//data527.click/98b31bdd544a9930f268/3ed8752de1/?placementName=default"></script>
+<script type="text/javascript" src="//cdn-server.live/4abb6c32e6a15ca69842/6b2e82eb84/?placementName=default"></script>
+</div></aside></div>
+<footer>© 2026 HostBench Notes</footer>
+</body></html>

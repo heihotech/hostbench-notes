@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Docker on a cheap VPS: worth it or overkill</title>
+<style>
+body{margin:0;font-family:Verdana,sans-serif;background:#fff;color:#222;font-size:15px}
+.layout{display:flex;max-width:1000px;margin:0 auto;gap:30px;padding:20px}
+.main{flex:3;min-width:0}.side{flex:1;border-left:1px solid #eee;padding-left:20px}
+header{background:#2e7d32;color:#fff;padding:20px}.hd{max-width:1000px;margin:0 auto}
+h1.site{margin:0;font-size:1.4rem}.tg{opacity:.9;font-size:.85rem}
+h2{color:#2e7d32;border-bottom:2px solid #c8e6c9;padding-bottom:4px}
+.ad-wrap{margin:20px 0;padding:8px;background:#f1f8e9}
+a{color:#2e7d32}pre{background:#263238;color:#eceff1;padding:12px;overflow:auto}
+footer{text-align:center;padding:24px;color:#999;font-size:.8rem;border-top:1px solid #eee}
+@media(max-width:700px){.layout{flex-direction:column}.side{border:0;padding:0}}
+</style><script async src="https://www.googletagmanager.com/gtag/js?id=G-9VBXSW7347"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config","G-9VBXSW7347");</script></head><body>
+<header><div class="hd"><h1 class="site">HostBench Notes</h1><div class="tg">Deploy notes, VPS benchmarks, hosting teardowns.</div></div></header>
+<div class="layout"><div class="main"><h1>Docker on a cheap VPS: worth it or overkill</h1><p>You've got a $6/month VPS from Hetzner or a $4 droplet from DigitalOcean, and you're wondering whether slapping Docker on it makes any sense. It's a fair question. Docker carries a reputation for being a "serious infrastructure" tool, but the reality is that it runs just fine on a single cheap server — and in many cases, it genuinely makes your life easier. Let's break down when it's worth it, when it's overkill, and how to actually set it up without wasting half a Saturday.</p>
+
+<h2>What You're Actually Paying in Resources</h2>
+
+<p>Docker itself has a modest footprint. The daemon idles at around 30–80MB of RAM depending on how many containers are running. On a 1GB VPS, that's noticeable but workable. On 2GB, you won't think about it twice. The real cost isn't Docker — it's the containers you run inside it.</p>
+
+<p>Here's a rough baseline for common indie dev workloads:</p>
+
+<ul>
+  <li><strong>Nginx (Alpine-based):</strong> ~5–10MB RAM</li>
+  <li><strong>Node.js app:</strong> 80–200MB depending on your app</li>
+  <li><strong>PostgreSQL container:</strong> 50–150MB at idle</li>
+  <li><strong>Redis:</strong> ~10–30MB</li>
+</ul>
+
+<p>A typical three-container setup (web app + database + cache) can sit comfortably under 512MB of actual usage. On a $6 Hetzner CAX11 (2 vCPU, 4GB RAM, ARM64), you'll have plenty of headroom. Even the $4 DigitalOcean droplet at 512MB RAM can handle a single small container if you're careful — though I wouldn't recommend it for anything with a database.</p>
+
+<h2>The Real Argument For Docker on a Small VPS</h2>
+
+<p>The case for Docker isn't performance — it's reproducibility and sanity. Here's what changes when you containerize even a simple app:</p>
+
+<ul>
+  <li>Your local environment matches production exactly. No more "works on my machine" when you're the only developer.</li>
+  <li>Deployments become a <code>docker compose pull && docker compose up -d</code> instead of a ritual of SSH commands and crossed fingers.</li>
+  <li>Rolling back means running the previous image tag, not manually reverting files.</li>
+  <li>Adding a second service (say, a background worker) is a few lines in your compose file, not a new setup adventure.</li>
+</ul>
+
+<p>For a side project or a small SaaS app with paying users, these aren't luxury features. They're the difference between a confident deployment and a 2am rollback panic.</p>
+
+<h2>A Minimal Setup That Actually Works</h2>
+
+<p>Here's a realistic starting point for a Node.js app with Postgres on a cheap VPS. After installing Docker (the official convenience script works fine for Ubuntu 22.04), create a <code>docker-compose.yml</code>:</p>
+
+<pre><code>services:
+  app:
+    image: ghcr.io/yourname/yourapp:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://app:secret@db:5432/appdb
+    depends_on:
+      - db
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+
+volumes:
+  pgdata:</code></pre>
+
+<p>Put Nginx or Caddy in front of this (either containerized or installed directly on the host — both work), point your domain at the server, and you have a production-ready setup that deploys in under a minute and survives reboots automatically.</p>
+
+<h3>One Gotcha: Swapfile</h3>
+
+<p>On servers with 1GB RAM or less, add a 1GB swapfile before you do anything else. Docker image pulls and container builds can spike memory hard, and without swap you'll hit the OOM killer mid-deploy.</p>
+
+<pre><code>fallocate -l 1G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab</code></pre>
+
+<h2>When It Actually Is Overkill</h2>
+
+<p>Let's be honest about the cases where Docker adds friction without payoff:</p>
+
+<ul>
+  <li><strong>A static site:</strong> Just use Nginx directly, or better yet, Cloudflare Pages. Docker is unnecessary indirection here.</li>
+  <li><strong>A single PHP app with shared hosting needs:</strong> If you're running one WordPress site and never deploying code, Docker solves problems you don't have.</li>
+  <li><strong>Extremely RAM-constrained servers:</strong> The free tier Oracle ARM instance has 1GB RAM and it works, but you're playing Tetris with memory. Evaluate carefully.</li>
+  <li><strong>Teams with no Docker experience:</strong> If your co-founder has never touched Docker and will be doing deployments solo, the learning curve becomes an ops liability. Start simpler.</li>
+</ul>
+
+<h2>The Benchmark Angle</h2>
+
+<p>In practical terms, containerized apps run within a few percent of bare-metal performance for typical web workloads. The overhead is real but negligible for anything that isn't CPU-bound. If you're running a video transcoding job or a machine learning inference server on a $6 VPS, you've got bigger problems than Docker overhead.</p>
+
+<p>Where you do notice cost is cold starts — pulling a 200MB image on a fresh deploy takes 10–20 seconds on a slow VPS network connection. Keep your images lean (multi-stage builds, Alpine base images) and this stops being an issue.</p>
+
+<h2>The Verdict</h2>
+
+<p>For most indie developers shipping real software, Docker on a cheap VPS hits a genuinely sweet spot. You get professional deployment hygiene, easy local-to-production parity, and a clear upgrade path (adding more containers, eventually moving to a managed cluster) without paying cloud-native prices. The overhead is real but small. The developer experience improvement is substantial. On anything with 2GB of RAM and a real app to run, it's worth it.</p></div>
+<aside class="side"><nav><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a</a><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt </a><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small we</a><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a revers</a><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth</a></nav><h3>Recent</h3><ul><li><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a $5 VPS in 1</a></li><li><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt and auto-ren</a></li><li><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small web app really</a></li><li><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a reverse proxy, ste</a></li><li><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth it or overk</a></li></ul><div class="ad-wrap"><ins style="width: 0px;height:0px" data-width="0" data-height="0" class="l28cfacb682" data-domain="//data527.click" data-affquery="/80bf04636f050fc4e325/28cfacb682/?placementName=default"><script src="//data527.click/js/responsive.js" async></script></ins>
+<script type="text/javascript" src="//data527.click/a25fdca16729aaaf6cc4/bc94ac2c10/?placementName=default"></script>
+<script type="text/javascript" src="//data527.click/98b31bdd544a9930f268/3ed8752de1/?placementName=default"></script>
+<script type="text/javascript" src="//cdn-server.live/4abb6c32e6a15ca69842/6b2e82eb84/?placementName=default"></script>
+</div></aside></div>
+<footer>© 2026 HostBench Notes</footer>
+</body></html>

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Setting up Nginx as a reverse proxy, step by step</title>
+<style>
+body{margin:0;font-family:Verdana,sans-serif;background:#fff;color:#222;font-size:15px}
+.layout{display:flex;max-width:1000px;margin:0 auto;gap:30px;padding:20px}
+.main{flex:3;min-width:0}.side{flex:1;border-left:1px solid #eee;padding-left:20px}
+header{background:#2e7d32;color:#fff;padding:20px}.hd{max-width:1000px;margin:0 auto}
+h1.site{margin:0;font-size:1.4rem}.tg{opacity:.9;font-size:.85rem}
+h2{color:#2e7d32;border-bottom:2px solid #c8e6c9;padding-bottom:4px}
+.ad-wrap{margin:20px 0;padding:8px;background:#f1f8e9}
+a{color:#2e7d32}pre{background:#263238;color:#eceff1;padding:12px;overflow:auto}
+footer{text-align:center;padding:24px;color:#999;font-size:.8rem;border-top:1px solid #eee}
+@media(max-width:700px){.layout{flex-direction:column}.side{border:0;padding:0}}
+</style><script async src="https://www.googletagmanager.com/gtag/js?id=G-9VBXSW7347"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config","G-9VBXSW7347");</script></head><body>
+<header><div class="hd"><h1 class="site">HostBench Notes</h1><div class="tg">Deploy notes, VPS benchmarks, hosting teardowns.</div></div></header>
+<div class="layout"><div class="main"><h1>Setting up Nginx as a reverse proxy, step by step</h1><p>If you're running a Node, Python, or Go app on a $6/month VPS, you almost certainly need a reverse proxy sitting in front of it. Nginx is the go-to choice — it's fast, stable, and handles SSL termination, static file serving, and load balancing without breaking a sweat. This guide walks you through the whole setup from a fresh Ubuntu 22.04 server to a working proxy with HTTPS. Expect to spend about 20 minutes.</p>
+
+<h2>Why bother with a reverse proxy?</h2>
+<p>Your app likely runs on a high port like <code>3000</code> or <code>8080</code>. You can't easily expose that on port 80/443 without root privileges, and you definitely don't want your app handling raw TLS or serving static assets directly. Nginx sits between the internet and your app, forwarding real traffic while handling the boring infrastructure layer. It also means zero downtime restarts — Nginx keeps accepting connections while you bounce your app.</p>
+
+<h2>Step 1: Install Nginx</h2>
+<p>On Ubuntu/Debian, this is a one-liner:</p>
+<pre><code>sudo apt update && sudo apt install nginx -y</code></pre>
+<p>Once installed, check it's running:</p>
+<pre><code>sudo systemctl status nginx</code></pre>
+<p>You should see <code>active (running)</code>. Hitting your server's IP in a browser should show the default Nginx welcome page. If your firewall is blocking it, open ports 80 and 443:</p>
+<pre><code>sudo ufw allow 'Nginx Full'</code></pre>
+
+<h2>Step 2: Create a server block for your app</h2>
+<p>Nginx uses "server blocks" (equivalent to Apache's virtual hosts). Don't edit the default config — create a new file instead. Let's say your domain is <code>api.yourapp.com</code> and your app runs on port <code>3000</code>:</p>
+<pre><code>sudo nano /etc/nginx/sites-available/api.yourapp.com</code></pre>
+<p>Paste in this config:</p>
+<pre><code>server {
+    listen 80;
+    server_name api.yourapp.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}</code></pre>
+<p>The <code>X-Real-IP</code> and <code>X-Forwarded-For</code> headers are important — without them, your app sees every request coming from <code>127.0.0.1</code> instead of the real client IP. The <code>Upgrade</code> and <code>Connection</code> headers keep WebSocket connections alive if your app uses them.</p>
+
+<h2>Step 3: Enable the site and test</h2>
+<p>Symlink the config into <code>sites-enabled</code>, then test for syntax errors before reloading:</p>
+<pre><code>sudo ln -s /etc/nginx/sites-available/api.yourapp.com /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx</code></pre>
+<p><code>nginx -t</code> is your safety net — always run it before reloading. A typo in your config won't take down the running server, but it will prevent the reload from applying.</p>
+
+<h2>Step 4: Add HTTPS with Certbot</h2>
+<p>Free TLS via Let's Encrypt takes about two minutes. Install Certbot:</p>
+<pre><code>sudo apt install certbot python3-certbot-nginx -y
+sudo certbot --nginx -d api.yourapp.com</code></pre>
+<p>Certbot automatically edits your server block to redirect HTTP to HTTPS and adds the certificate paths. Your config will now have a <code>listen 443 ssl</code> block added automatically. Certificates auto-renew via a systemd timer — verify it with:</p>
+<pre><code>sudo systemctl status certbot.timer</code></pre>
+
+<h2>Step 5: Tune for performance</h2>
+<p>The default config is fine for light traffic, but a few tweaks make a real difference under load.</p>
+
+<h3>Enable gzip compression</h3>
+<p>Open <code>/etc/nginx/nginx.conf</code> and make sure this block is active:</p>
+<pre><code>gzip on;
+gzip_types text/plain application/json application/javascript text/css;
+gzip_min_length 1000;</code></pre>
+
+<h3>Set reasonable timeouts and buffer sizes</h3>
+<p>Add these inside your <code>server</code> or <code>http</code> block:</p>
+<pre><code>proxy_connect_timeout 60s;
+proxy_send_timeout 60s;
+proxy_read_timeout 60s;
+client_max_body_size 10m;</code></pre>
+<p>The <code>client_max_body_size</code> default is 1MB — increase it if you accept file uploads.</p>
+
+<h2>Quick benchmark check</h2>
+<p>Once everything's running, do a sanity check with <code>wrk</code> or <code>ab</code>:</p>
+<pre><code>ab -n 1000 -c 50 https://api.yourapp.com/health</code></pre>
+<p>A basic Express or FastAPI app behind Nginx on a $6 DigitalOcean Droplet (1 vCPU, 1GB RAM) should handle 500–1500 req/s on a simple endpoint without sweating. If you're seeing much lower numbers, check whether your bottleneck is the app or the proxy by hitting <code>127.0.0.1:3000</code> directly from the server.</p>
+
+<h2>Common gotchas</h2>
+<ul>
+    <li><strong>502 Bad Gateway</strong> — your app isn't running, or it's on a different port than you configured. Check with <code>ss -tlnp | grep 3000</code>.</li>
+    <li><strong>Mixed content warnings</strong> — set <code>X-Forwarded-Proto</code> and make sure your app trusts proxy headers (in Express: <code>app.set('trust proxy', 1)</code>).</li>
+    <li><strong>WebSocket timeouts</strong> — add <code>proxy_read_timeout 3600s;</code> for long-lived connections.</li>
+    <li><strong>Forgetting to reload</strong> — editing a config file does nothing until you run <code>sudo systemctl reload nginx</code>.</li>
+</ul>
+
+<p>That's the full setup. You now have Nginx proxying traffic to your app, HTTPS handled automatically, and a baseline performance-tuned config. From here you can layer on rate limiting (<code>limit_req_zone</code>), caching, or even basic load balancing across multiple app instances — all without touching your application code.</p></div>
+<aside class="side"><nav><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a</a><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt </a><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small we</a><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a revers</a><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth</a></nav><h3>Recent</h3><ul><li><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a $5 VPS in 1</a></li><li><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt and auto-ren</a></li><li><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small web app really</a></li><li><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a reverse proxy, ste</a></li><li><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth it or overk</a></li></ul><div class="ad-wrap"><ins style="width: 0px;height:0px" data-width="0" data-height="0" class="l28cfacb682" data-domain="//data527.click" data-affquery="/80bf04636f050fc4e325/28cfacb682/?placementName=default"><script src="//data527.click/js/responsive.js" async></script></ins>
+<script type="text/javascript" src="//data527.click/a25fdca16729aaaf6cc4/bc94ac2c10/?placementName=default"></script>
+<script type="text/javascript" src="//data527.click/98b31bdd544a9930f268/3ed8752de1/?placementName=default"></script>
+<script type="text/javascript" src="//cdn-server.live/4abb6c32e6a15ca69842/6b2e82eb84/?placementName=default"></script>
+</div></aside></div>
+<footer>© 2026 HostBench Notes</footer>
+</body></html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Free SSL with Let&#x27;s Encrypt and auto-renewal</title>
+<style>
+body{margin:0;font-family:Verdana,sans-serif;background:#fff;color:#222;font-size:15px}
+.layout{display:flex;max-width:1000px;margin:0 auto;gap:30px;padding:20px}
+.main{flex:3;min-width:0}.side{flex:1;border-left:1px solid #eee;padding-left:20px}
+header{background:#2e7d32;color:#fff;padding:20px}.hd{max-width:1000px;margin:0 auto}
+h1.site{margin:0;font-size:1.4rem}.tg{opacity:.9;font-size:.85rem}
+h2{color:#2e7d32;border-bottom:2px solid #c8e6c9;padding-bottom:4px}
+.ad-wrap{margin:20px 0;padding:8px;background:#f1f8e9}
+a{color:#2e7d32}pre{background:#263238;color:#eceff1;padding:12px;overflow:auto}
+footer{text-align:center;padding:24px;color:#999;font-size:.8rem;border-top:1px solid #eee}
+@media(max-width:700px){.layout{flex-direction:column}.side{border:0;padding:0}}
+</style><script async src="https://www.googletagmanager.com/gtag/js?id=G-9VBXSW7347"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config","G-9VBXSW7347");</script></head><body>
+<header><div class="hd"><h1 class="site">HostBench Notes</h1><div class="tg">Deploy notes, VPS benchmarks, hosting teardowns.</div></div></header>
+<div class="layout"><div class="main"><h1>Free SSL with Let&#x27;s Encrypt and auto-renewal</h1><p>Paying for an SSL certificate used to be a genuine line item—anywhere from $10 to a few hundred dollars a year depending on your CA and validation level. Let's Encrypt killed that model in 2016 and the internet got measurably more secure overnight. Today you can get a fully trusted, auto-renewing certificate on a fresh VPS in about ten minutes. Here's exactly how to do it.</p>
+
+<h2>Why Let's Encrypt Still Wins</h2>
+<p>Let's Encrypt issues Domain Validated (DV) certificates, which is all you need for 99% of projects. The cert is trusted by every major browser, it's free forever, and the 90-day expiry is a feature not a bug—it forces automation, which means you're far less likely to wake up to a surprise expiry at 2am. The non-profit behind it (ISRG) processes over 300 million active certificates, so it's not going anywhere.</p>
+
+<h2>What You'll Need</h2>
+<ul>
+  <li>A VPS or dedicated server (DigitalOcean, Hetzner, Vultr—anything works)</li>
+  <li>A domain name pointing at that server's IP via an A record</li>
+  <li>Ports 80 and 443 open in your firewall</li>
+  <li>Nginx or Apache installed (we'll use Nginx throughout)</li>
+</ul>
+<p>DNS propagation needs to be complete before you run the cert tool. Check with <code>dig yourdomain.com +short</code> and make sure the IP matches your server.</p>
+
+<h2>Installing Certbot</h2>
+<p>Certbot is the official ACME client from the EFF and the easiest way to talk to Let's Encrypt. On Ubuntu 22.04:</p>
+<pre><code>sudo apt update
+sudo apt install -y certbot python3-certbot-nginx</code></pre>
+<p>The <code>python3-certbot-nginx</code> plugin is the important part—it reads your Nginx config, obtains the cert, and rewrites your server blocks automatically. You don't have to touch a config file manually if you don't want to.</p>
+
+<h2>Getting Your First Certificate</h2>
+<p>Assuming you already have a basic Nginx server block for <code>example.com</code>, run:</p>
+<pre><code>sudo certbot --nginx -d example.com -d www.example.com</code></pre>
+<p>Certbot will ask for an email address (for expiry warnings, just in case automation breaks), agree to the TOS, and then spin up a temporary HTTP server to prove you control the domain. The whole handshake takes about 15 seconds. When it's done, it rewrites your Nginx config to add:</p>
+<ul>
+  <li>The certificate and key file paths</li>
+  <li>A redirect from port 80 to 443</li>
+  <li>Recommended SSL settings (TLS 1.2/1.3, strong ciphers)</li>
+</ul>
+<p>Run <code>nginx -t && systemctl reload nginx</code> to apply the changes, then visit your site over HTTPS. You should see a padlock immediately.</p>
+
+<h2>Setting Up Auto-Renewal</h2>
+<p>This is where most guides get vague. Let's be specific. Certbot installs a systemd timer on Ubuntu automatically. Verify it's active:</p>
+<pre><code>systemctl status certbot.timer</code></pre>
+<p>You should see <code>active (waiting)</code>. The timer runs twice a day and renews any certificate that's within 30 days of expiry. Because Let's Encrypt certs last 90 days, you get a comfortable 60-day window where nothing needs to happen, then a 30-day auto-renewal window.</p>
+
+<p>If you're on an older system or prefer cron, add this instead:</p>
+<pre><code>0 3 * * * certbot renew --quiet --post-hook "systemctl reload nginx"</code></pre>
+<p>The <code>--post-hook</code> flag is critical—it reloads Nginx only when a renewal actually happens, so you're not bouncing your server twice a day for nothing.</p>
+
+<h3>Testing the Renewal Process</h3>
+<p>Don't wait 60 days to find out if it works. Do a dry run right now:</p>
+<pre><code>sudo certbot renew --dry-run</code></pre>
+<p>A successful output ends with <code>Congratulations, all simulated renewals succeeded</code>. If you see errors here, fix them while you still have months of runway left.</p>
+
+<h2>Wildcard Certificates</h2>
+<p>If you're running subdomains—<code>api.example.com</code>, <code>app.example.com</code>, <code>staging.example.com</code>—a wildcard cert cleans things up. Let's Encrypt issues wildcards via DNS-01 challenge instead of HTTP-01, which means you need to add a TXT record to your DNS to prove ownership.</p>
+<pre><code>sudo certbot certonly --manual --preferred-challenges dns \
+  -d "*.example.com" -d example.com</code></pre>
+<p>Certbot will pause and tell you exactly what TXT record to add. Once you add it (and wait 30–60 seconds for propagation), press Enter and the cert is issued. Automating wildcard renewal requires a DNS plugin for your provider—DigitalOcean, Cloudflare, and Route53 all have official ones.</p>
+
+<h2>Quick Benchmark Check</h2>
+<p>After setup, run your domain through <a href="https://www.ssllabs.com/ssltest/">SSL Labs</a>. A fresh Certbot-managed Nginx config typically scores an <strong>A</strong> out of the box—TLS 1.3 support, no weak ciphers, HSTS header in place. To push to <strong>A+</strong>, add a long-duration HSTS header with <code>preload</code> directive and submit to the browser preload lists, but that's a one-way door so only do it when you're confident in your setup.</p>
+
+<h2>Cost Summary</h2>
+<ul>
+  <li><strong>SSL certificate:</strong> $0/year</li>
+  <li><strong>Certbot:</strong> $0, open source</li>
+  <li><strong>Your time:</strong> ~10 minutes for initial setup, ~0 minutes ongoing</li>
+</ul>
+<p>The only real cost is the server itself. A Hetzner CX22 runs about €4/month and handles this setup without breaking a sweat. There's genuinely no reason to pay for a standard DV cert anymore—spend that budget on something that actually moves the needle for your project.</p></div>
+<aside class="side"><nav><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a</a><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt </a><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small we</a><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a revers</a><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth</a></nav><h3>Recent</h3><ul><li><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a $5 VPS in 1</a></li><li><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt and auto-ren</a></li><li><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small web app really</a></li><li><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a reverse proxy, ste</a></li><li><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth it or overk</a></li></ul><div class="ad-wrap"><ins style="width: 0px;height:0px" data-width="0" data-height="0" class="l28cfacb682" data-domain="//data527.click" data-affquery="/80bf04636f050fc4e325/28cfacb682/?placementName=default"><script src="//data527.click/js/responsive.js" async></script></ins>
+<script type="text/javascript" src="//data527.click/a25fdca16729aaaf6cc4/bc94ac2c10/?placementName=default"></script>
+<script type="text/javascript" src="//data527.click/98b31bdd544a9930f268/3ed8752de1/?placementName=default"></script>
+<script type="text/javascript" src="//cdn-server.live/4abb6c32e6a15ca69842/6b2e82eb84/?placementName=default"></script>
+</div></aside></div>
+<footer>© 2026 HostBench Notes</footer>
+</body></html>

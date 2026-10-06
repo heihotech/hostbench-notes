@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deploying a static site to a $5 VPS in 10 minutes</title>
+<style>
+body{margin:0;font-family:Verdana,sans-serif;background:#fff;color:#222;font-size:15px}
+.layout{display:flex;max-width:1000px;margin:0 auto;gap:30px;padding:20px}
+.main{flex:3;min-width:0}.side{flex:1;border-left:1px solid #eee;padding-left:20px}
+header{background:#2e7d32;color:#fff;padding:20px}.hd{max-width:1000px;margin:0 auto}
+h1.site{margin:0;font-size:1.4rem}.tg{opacity:.9;font-size:.85rem}
+h2{color:#2e7d32;border-bottom:2px solid #c8e6c9;padding-bottom:4px}
+.ad-wrap{margin:20px 0;padding:8px;background:#f1f8e9}
+a{color:#2e7d32}pre{background:#263238;color:#eceff1;padding:12px;overflow:auto}
+footer{text-align:center;padding:24px;color:#999;font-size:.8rem;border-top:1px solid #eee}
+@media(max-width:700px){.layout{flex-direction:column}.side{border:0;padding:0}}
+</style><script async src="https://www.googletagmanager.com/gtag/js?id=G-9VBXSW7347"></script><script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag("js",new Date());gtag("config","G-9VBXSW7347");</script></head><body>
+<header><div class="hd"><h1 class="site">HostBench Notes</h1><div class="tg">Deploy notes, VPS benchmarks, hosting teardowns.</div></div></header>
+<div class="layout"><div class="main"><h1>Deploying a static site to a $5 VPS in 10 minutes</h1><p>Managed hosting platforms are convenient until you see the bill. Netlify, Vercel, and friends are great, but once you need a custom server config, private networking, or you just want to understand what's actually happening under the hood, a cheap VPS is hard to beat. A $5/month Hetzner or DigitalOcean droplet running Nginx can serve a static site to thousands of visitors without breaking a sweat — and you'll own the whole stack. Here's how to get there in about ten minutes.</p>
+
+<h2>What You'll Need</h2>
+
+<ul>
+  <li>A VPS — Hetzner Cloud CX11 ($4.15/mo) or DigitalOcean Basic Droplet ($6/mo) both work fine</li>
+  <li>Ubuntu 22.04 LTS (the examples below assume this)</li>
+  <li>A domain name pointed at your server's IP</li>
+  <li>Your static site files (a plain HTML folder, a built Astro/Next export, whatever)</li>
+  <li>SSH access to the server</li>
+</ul>
+
+<h2>Step 1: Provision the Server (2 minutes)</h2>
+
+<p>Spin up the smallest available instance. On Hetzner, that's a CX11 with 1 vCPU and 2 GB RAM. On DigitalOcean it's their 1 GB Basic droplet — bump it to the $6 tier for 1 GB RAM if you can. Add your SSH public key during setup so you skip password auth entirely.</p>
+
+<p>Once it's live, SSH in:</p>
+
+<pre><code>ssh root@YOUR_SERVER_IP</code></pre>
+
+<p>Run a quick update before touching anything else:</p>
+
+<pre><code>apt update && apt upgrade -y</code></pre>
+
+<h2>Step 2: Install Nginx (1 minute)</h2>
+
+<p>Nginx is lightweight, battle-tested, and dead simple to configure for static files. Install it and make sure it starts on boot:</p>
+
+<pre><code>apt install nginx -y
+systemctl enable nginx
+systemctl start nginx</code></pre>
+
+<p>Visit your server's IP in a browser. You should see the default Nginx welcome page. That's your green light.</p>
+
+<h2>Step 3: Upload Your Site Files (2 minutes)</h2>
+
+<p>The default web root is <code>/var/www/html</code>. You can either drop your files there or create a dedicated directory — the latter is cleaner if you're hosting multiple sites later.</p>
+
+<pre><code>mkdir -p /var/www/mysite
+chown -R www-data:www-data /var/www/mysite</code></pre>
+
+<p>From your local machine, use <code>rsync</code> to push your build folder up. If your static site lives in a <code>dist/</code> directory (common with Astro, Vite, or Eleventy builds):</p>
+
+<pre><code>rsync -avz --delete ./dist/ root@YOUR_SERVER_IP:/var/www/mysite/</code></pre>
+
+<p>The <code>--delete</code> flag removes stale files on the server that no longer exist locally. Useful when you re-deploy after removing pages.</p>
+
+<h2>Step 4: Configure Nginx (2 minutes)</h2>
+
+<p>Create a new server block instead of editing the default config:</p>
+
+<pre><code>nano /etc/nginx/sites-available/mysite</code></pre>
+
+<p>Paste this in, swapping out the domain and path:</p>
+
+<pre><code>server {
+    listen 80;
+    server_name yourdomain.com www.yourdomain.com;
+
+    root /var/www/mysite;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # Cache static assets aggressively
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff2)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}</code></pre>
+
+<p>Enable the config and reload Nginx:</p>
+
+<pre><code>ln -s /etc/nginx/sites-available/mysite /etc/nginx/sites-enabled/
+nginx -t
+systemctl reload nginx</code></pre>
+
+<p><code>nginx -t</code> is your best friend — always test the config before reloading to avoid downtime from a typo.</p>
+
+<h2>Step 5: Add HTTPS with Certbot (2 minutes)</h2>
+
+<p>No excuses for shipping without TLS in 2024. Certbot makes it free and nearly automatic:</p>
+
+<pre><code>apt install certbot python3-certbot-nginx -y
+certbot --nginx -d yourdomain.com -d www.yourdomain.com</code></pre>
+
+<p>Follow the prompts, choose option 2 to redirect HTTP to HTTPS, and Certbot will rewrite your Nginx config automatically. Certificates auto-renew via a systemd timer — you never have to think about it again.</p>
+
+<h2>What Kind of Traffic Can This Handle?</h2>
+
+<p>More than you'd expect. Nginx serving pre-built HTML and cached assets is extraordinarily efficient. A $5-6 VPS can comfortably handle several hundred concurrent connections and well over 1,000 requests per second for typical static content. Run a quick benchmark from your local machine with <code>wrk</code> to see for yourself:</p>
+
+<pre><code>wrk -t4 -c100 -d30s https://yourdomain.com</code></pre>
+
+<p>On a Hetzner CX11 with a simple HTML page, you'll typically see 8,000–15,000 requests/second. That's enough headroom for a product launch spike or a sudden burst of traffic from a newsletter.</p>
+
+<h2>Automating Future Deploys</h2>
+
+<p>Once this is working, the natural next step is wiring it into your CI pipeline. A GitHub Actions workflow that runs <code>rsync</code> after a successful build takes about 15 minutes to set up and means every push to <code>main</code> automatically updates the live site. Store your SSH private key as a GitHub secret, point it at your server, and you've got a lightweight CD pipeline for under $6 a month total.</p>
+
+<h3>A Few Extras Worth Adding</h3>
+
+<ul>
+  <li><strong>UFW firewall:</strong> <code>ufw allow 'Nginx Full' && ufw enable</code> — do this early</li>
+  <li><strong>Fail2ban:</strong> blocks brute-force SSH attempts automatically</li>
+  <li><strong>Gzip compression:</strong> add <code>gzip on;</code> to your Nginx config for smaller payloads</li>
+  <li><strong>Monitoring:</strong> even a free UptimeRobot check gives you uptime alerts</li>
+</ul>
+
+<p>The whole setup costs less than a coffee per month and gives you complete control. Once you've done it once, the muscle memory sticks — next time you'll have a site live in five minutes, not ten.</p></div>
+<aside class="side"><nav><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a</a><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt </a><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small we</a><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a revers</a><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth</a></nav><h3>Recent</h3><ul><li><a href="deploying-a-static-site-to-a-5-vps-in-10-minutes.html">Deploying a static site to a $5 VPS in 1</a></li><li><a href="free-ssl-with-lets-encrypt-and-auto-renewal.html">Free SSL with Let&#x27;s Encrypt and auto-ren</a></li><li><a href="how-much-ram-does-a-small-web-app-really-need.html">How much RAM does a small web app really</a></li><li><a href="setting-up-nginx-as-a-reverse-proxy-step-by-step.html">Setting up Nginx as a reverse proxy, ste</a></li><li><a href="docker-on-a-cheap-vps-worth-it-or-overkill.html">Docker on a cheap VPS: worth it or overk</a></li></ul><div class="ad-wrap"><ins style="width: 0px;height:0px" data-width="0" data-height="0" class="l28cfacb682" data-domain="//data527.click" data-affquery="/80bf04636f050fc4e325/28cfacb682/?placementName=default"><script src="//data527.click/js/responsive.js" async></script></ins>
+<script type="text/javascript" src="//data527.click/a25fdca16729aaaf6cc4/bc94ac2c10/?placementName=default"></script>
+<script type="text/javascript" src="//data527.click/98b31bdd544a9930f268/3ed8752de1/?placementName=default"></script>
+<script type="text/javascript" src="//cdn-server.live/4abb6c32e6a15ca69842/6b2e82eb84/?placementName=default"></script>
+</div></aside></div>
+<footer>© 2026 HostBench Notes</footer>
+</body></html>
